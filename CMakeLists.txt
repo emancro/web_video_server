@@ -45,6 +45,7 @@ include_directories(include
   ${avformat_INCLUDE_DIRS}
   ${avutil_INCLUDE_DIRS}
   ${swscale_INCLUDE_DIRS}
+  include/${PROJECT_NAME}
 )
 
 ## Declare a cpp library
@@ -60,6 +61,7 @@ add_library(${PROJECT_NAME} SHARED
   src/jpeg_streamers.cpp
   src/png_streamers.cpp
   src/utils.cpp
+  src/shared_mem.cpp
 )
 
 ## Specify libraries to link a library or executable target against
