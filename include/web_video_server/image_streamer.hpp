@@ -42,7 +42,7 @@
 #include "web_video_server/utils.hpp"
 #include "async_web_server_cpp/http_server.hpp"
 #include "async_web_server_cpp/http_request.hpp"
-
+#include "shared_mem.h"
 namespace web_video_server
 {
 

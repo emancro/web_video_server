@@ -155,7 +155,7 @@ cv::Mat ImageTransportImageStreamer::decodeImage(
     return float_image;
   } else {
     // Convert to OpenCV native BGR color
-    return cv_bridge::toCvCopy(msg, "bgr8")->image;
+    return cv_bridge::toCvCopy(msg, msg->encoding)->image;
   }
 }
 
@@ -166,64 +166,120 @@ void ImageTransportImageStreamer::imageCallback(const sensor_msgs::msg::Image::C
   }
 
   cv::Mat img;
+
+
+  std::string header = msg->header.frame_id;
+  std::string::size_type n = header.find("--shm--");
+  bool shmem = false;
+  if (n != std::string::npos) {
+    // RCLCPP_INFO(node_->get_logger(), "Topic is sharedmem");
+
+    std::string fname = header.substr(n + 7); // "--shm-- is 7 letters long"
+    // RCLCPP_INFO(node_->get_logger(), fname.c_str());
+
+    int img_size = msg->width * msg->height * 3;
+
+    if (img.cols != msg->width && img.rows != msg->height){
+      
+      //create the correct cv mat
+      if(msg->encoding == "mono8"){
+        img = cv::Mat(msg->height, msg->width, CV_8UC1);
+        img_size = msg->width * msg->height * 1;
+      }else if (msg->encoding == "bgr8"){
+        img = cv::Mat(msg->height, msg->width, CV_8UC3);
+      }else if (msg->encoding == "rgb8"){
+        img = cv::Mat(msg->height, msg->width, CV_8UC3);
+      }else if (msg->encoding == "rgba8"){
+        img = cv::Mat(msg->height, msg->width, CV_8UC4);
+        img_size = msg->width * msg->height * 4;
+      }else if (msg->encoding == "bgra8"){
+        img = cv::Mat(msg->height, msg->width, CV_8UC4);
+        img_size = msg->width * msg->height * 4;
+      }else if (msg->encoding == "mono16"){
+        img = cv::Mat(msg->height, msg->width, CV_16UC1);
+        img_size = msg->width * msg->height * 2;
+      }else if (msg->encoding == "16UC1"){
+        img = cv::Mat(msg->height, msg->width, CV_16UC1);
+        img_size = msg->width * msg->height * 2;
+      }else{
+        img = cv::Mat(msg->height, msg->width, CV_8UC3);
+      }
+    }
+    // RCLCPP_INFO(node_->get_logger(), "Image size %d", img_size);
+    SharedMem shmem_sub(fname.c_str(), img_size, false);
+    memcpy(&img.data[0], shmem_sub.data(), img_size);
+    if (msg->encoding == "rgb8") {
+      cv::cvtColor(img, img, cv::COLOR_RGB2BGR);
+    }
+    shmem = true;
+  }
+  if (!shmem) {
+    try {
+      img = decodeImage(msg);
+    } catch (cv_bridge::Exception & e) {
+      auto & clk = *node_->get_clock();
+      RCLCPP_ERROR_THROTTLE(node_->get_logger(), clk, 40, "cv_bridge exception: %s", e.what());
+      inactive_ = true;
+      return;
+    } catch (cv::Exception & e) {
+      auto & clk = *node_->get_clock();
+      RCLCPP_ERROR_THROTTLE(node_->get_logger(), clk, 40, "cv_bridge exception: %s", e.what());
+      inactive_ = true;
+      return;
+    } catch (boost::system::system_error & e) {
+      // happens when client disconnects
+      RCLCPP_DEBUG(node_->get_logger(), "system_error exception: %s", e.what());
+      inactive_ = true;
+      return;
+    } catch (std::exception & e) {
+      auto & clk = *node_->get_clock();
+      RCLCPP_ERROR_THROTTLE(node_->get_logger(), clk, 40, "exception: %s", e.what());
+      inactive_ = true;
+      return;
+    } catch (...) {
+      auto & clk = *node_->get_clock();
+      RCLCPP_ERROR_THROTTLE(node_->get_logger(), clk, 40, "exception");
+      inactive_ = true;
+      return;
+    }
+  }
+  
+  int input_width = img.cols;
+  int input_height = img.rows;
+
+  if (output_width_ == -1) {
+    output_width_ = input_width;
+  }
+  if (output_height_ == -1) {
+    output_height_ = input_height;
+  }
+
+  if (invert_) {
+    // Rotate 180 degrees
+    cv::flip(img, img, false);
+    cv::flip(img, img, true);
+  }
+
+  std::scoped_lock lock(send_mutex_);  // protects output_size_image
+  if (output_width_ != input_width || output_height_ != input_height) {
+    cv::Mat img_resized;
+    cv::Size new_size(output_width_, output_height_);
+    cv::resize(img, img_resized, new_size);
+    output_size_image = img_resized;
+  } else {
+    output_size_image = img;
+  }
+
+  if (!initialized_) {
+    initialize(output_size_image);
+    initialized_ = true;
+  }
+
+  last_frame_ = std::chrono::steady_clock::now();
   try {
-    img = decodeImage(msg);
-    int input_width = img.cols;
-    int input_height = img.rows;
-
-    if (output_width_ == -1) {
-      output_width_ = input_width;
-    }
-    if (output_height_ == -1) {
-      output_height_ = input_height;
-    }
-
-    if (invert_) {
-      // Rotate 180 degrees
-      cv::flip(img, img, false);
-      cv::flip(img, img, true);
-    }
-
-    std::scoped_lock lock(send_mutex_);  // protects output_size_image
-    if (output_width_ != input_width || output_height_ != input_height) {
-      cv::Mat img_resized;
-      cv::Size new_size(output_width_, output_height_);
-      cv::resize(img, img_resized, new_size);
-      output_size_image = img_resized;
-    } else {
-      output_size_image = img;
-    }
-
-    if (!initialized_) {
-      initialize(output_size_image);
-      initialized_ = true;
-    }
-
-    last_frame_ = std::chrono::steady_clock::now();
     sendImage(output_size_image, last_frame_);
-  } catch (cv_bridge::Exception & e) {
-    auto & clk = *node_->get_clock();
-    RCLCPP_ERROR_THROTTLE(node_->get_logger(), clk, 40, "cv_bridge exception: %s", e.what());
-    inactive_ = true;
-    return;
-  } catch (cv::Exception & e) {
-    auto & clk = *node_->get_clock();
-    RCLCPP_ERROR_THROTTLE(node_->get_logger(), clk, 40, "cv_bridge exception: %s", e.what());
-    inactive_ = true;
-    return;
-  } catch (boost::system::system_error & e) {
-    // happens when client disconnects
+  } catch (boost::system::system_error &e) {
     RCLCPP_DEBUG(node_->get_logger(), "system_error exception: %s", e.what());
-    inactive_ = true;
-    return;
-  } catch (std::exception & e) {
-    auto & clk = *node_->get_clock();
-    RCLCPP_ERROR_THROTTLE(node_->get_logger(), clk, 40, "exception: %s", e.what());
-    inactive_ = true;
-    return;
-  } catch (...) {
-    auto & clk = *node_->get_clock();
-    RCLCPP_ERROR_THROTTLE(node_->get_logger(), clk, 40, "exception");
     inactive_ = true;
     return;
   }
